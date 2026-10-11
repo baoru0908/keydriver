@@ -1,0 +1,41 @@
+// 开关：Radix Switch 的行为层 + Tailwind 外观。
+import * as SwitchPrimitive from '@radix-ui/react-switch';
+import { cn } from '@/shared/cn';
+
+export interface SwitchProps {
+  readonly checked: boolean;
+  readonly onCheckedChange: (checked: boolean) => void;
+  readonly disabled?: boolean;
+  readonly id?: string;
+  readonly ariaLabel?: string;
+}
+
+export function Switch({
+  checked,
+  onCheckedChange,
+  disabled,
+  id,
+  ariaLabel,
+}: SwitchProps): React.JSX.Element {
+  return (
+    <SwitchPrimitive.Root
+      id={id}
+      checked={checked}
+      disabled={disabled}
+      aria-label={ariaLabel}
+      onCheckedChange={onCheckedChange}
+      className={cn(
+        'relative h-4 w-8 shrink-0 rounded-full transition-colors duration-fast ease-standard active:scale-[0.97]',
+        'bg-border-strong data-[state=checked]:bg-accent',
+        disabled && 'opacity-50',
+      )}
+    >
+      <SwitchPrimitive.Thumb
+        className={cn(
+          'block h-3 w-3 translate-x-0.5 rounded-full bg-fg transition-transform duration-fast ease-standard',
+          'data-[state=checked]:translate-x-4.5 data-[state=checked]:bg-bg',
+        )}
+      />
+    </SwitchPrimitive.Root>
+  );
+}

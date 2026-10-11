@@ -1,0 +1,518 @@
+// 设备状态：设备列表、连接态、握手结论、传输类型。UI 只通过它发起连接，不直接碰 ViaProtocol。
+import { create } from 'zustand';
+import type { HidDeviceInfo, ListDevicesOptions, ScanSummary, TransportKind } from '@/core/hid/HidTransport';
+import { createTransport } from '@/core/hid';
+import { knownIdKey } from '@/core/hid/viaFilter';
+import type { DummyConfig } from '@/core/hid/DummyTransport';
+import { createDeviceFacade, type DeviceFacade } from '@/core/device';
+import type { HandshakeResult } from '@/core/device/handshake';
+import type { ControlSpec, ParsedDefinition } from '@/definition/schema';
+import { parseId } from '@/definition/validate';
+import { findByVidPid, listDefinitions, setCurrentDefinitionId } from '@/definition/DefinitionRepository';
+import { addressKey } from '@/core/protocol/CustomValueCodec';
+import { readValue, useMenuStore, type ValueEntry } from './useMenuStore';
+import { applyBackup, buildBackup, type BackupFile, type ParseBackupResult } from '@/io/backup';
+import { useDebugStore } from './useDebugStore';
+import { useDefinitionStore } from './useDefinitionStore';
+import { useKeymapStore, selectKeycode } from './useKeymapStore';
+import { toErrorInfo } from '@/shared/result';
+
+/** 判断异常是否意味着「设备已经不在了」（重启 / 进入 bootloader / 被拔出）。 */
+function isGoneError(e: unknown): boolean {
+  const name = e instanceof Error ? e.name : '';
+  return name === 'TimeoutError' || name === 'DisconnectedError';
+}
+
+/**
+ * 写入前钳制到控件合法区间。
+ * ⚠️ range 的下限必须取 options[0]（35 个控件下限是 1 而不是 0），
+ * 且宽度推断与下限是两个独立维度，这里只管值域，不管字节数。
+ */
+function clampValue(control: ControlSpec, value: number): number {
+  if (control.options.kind === 'range') {
+    const { min, max } = control.options;
+    return Math.min(max, Math.max(min, Math.round(value)));
+  }
+  if (control.type === 'color') return Math.max(0, Math.min(0xffffff, Math.round(value)));
+  return Math.round(value) >>> 0;
+}
+
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+interface DeviceState {
+  transportKind: TransportKind;
+  devices: readonly HidDeviceInfo[];
+  selectedDeviceId: string | null;
+  state: ConnectionState;
+  handshake: HandshakeResult | null;
+  layoutOptions: number;
+  error: string | null;
+  busy: boolean;
+  /** false = 只显示可控制的键盘；true = 列出全部已授权 HID（调试/救急） */
+  showAllDevices: boolean;
+  /** 最近一次扫描摘要：共 N 台已授权 HID，其中 M 台可控制 */
+  scanSummary: ScanSummary | null;
+  setShowAllDevices: (value: boolean) => void;
+  setTransportKind: (kind: TransportKind) => void;
+  refreshDevices: () => Promise<void>;
+  selectDevice: (id: string | null) => void;
+  connect: (deviceId?: string) => Promise<boolean>;
+  disconnect: () => Promise<void>;
+  /** 连接后拉取全部层键位 */
+  reloadKeymap: () => Promise<void>;
+  applyKeycode: (layer: number, row: number, col: number, keycode: number) => Promise<boolean>;
+  applyLayoutOptions: (value: number) => Promise<void>;
+  // —— 菜单（T04）——
+  /** 懒加载某菜单的全部控件值（含被 showIf 隐藏的，因为要做条件变量） */
+  menuLoad: (menuId: string) => Promise<void>;
+  /** 乐观更新内存值 + 下发写入（range/color 走 200ms 防抖） */
+  menuCommit: (control: ControlSpec, value: number) => Promise<boolean>;
+  /** button 类动作：options 原样透传，执行后探活，设备消失则按断开处理 */
+  menuTrigger: (control: ControlSpec) => Promise<boolean>;
+  /** 把全部脏值刷入设备并逐个地址持久化（0x09） */
+  menuSaveAll: () => Promise<number>;
+  /** 撤销会话中最近一次变更（R-P1-07） */
+  undoLast: () => Promise<boolean>;
+  undoDepth: () => number;
+  deviceEepromReset: () => Promise<boolean>;
+  // —— 宏缓冲区（VIA MACRO）——
+  macroGetBuffer: (offset: number, size: number) => Promise<Uint8Array>;
+  macroSetBuffer: (offset: number, data: Uint8Array) => Promise<void>;
+  // —— 备份（T04.4）——
+  backupExport: () => BackupFile | null;
+  backupImport: (parsed: ParseBackupResult) => Promise<{ applied: number; missing: number }>;
+}
+
+/**
+ * 设备自动识别：按设备的 VID/PID 在已保存的定义库中查找，命中即自动切换到对应配置。
+ * 这样换一把键盘插上就能直接用它自己的配置，不必每次手工重新导入。
+ * 未命中时保持当前定义（由调用方提示导入）。
+ */
+async function ensureDefinitionForDevice(device: HidDeviceInfo): Promise<ParsedDefinition | null> {
+  const saved = await findByVidPid(device.vendorId, device.productId).catch(() => null);
+  if (saved?.raw) {
+    const current = useDefinitionStore.getState().definition;
+    const currentId = current ? `${current.vid}:${current.pid}` : null;
+    const savedId = `${parseId(saved.raw.vendorId)}:${parseId(saved.raw.productId)}`;
+    if (currentId !== savedId) {
+      useDefinitionStore.getState().loadFromJson(saved.raw, saved.meta.name);
+    }
+    // 记住这把设备对应的定义，下次启动自动恢复
+    await setCurrentDefinitionId(saved.meta.id).catch(() => undefined);
+  }
+  return useDefinitionStore.getState().definition;
+}
+
+/**
+ * 定义库里已登记设备的 "vid:pid"（十进制）列表。
+ * 命中即视为「可控制」——覆盖固件没规范声明 VIA RAW HID usage、但用户已导入定义的情况。
+ * 取不到时退化为空列表（只按 usage 过滤），不让扫描整体失败。
+ */
+async function knownDefinitionIds(): Promise<string[]> {
+  try {
+    const metas = await listDefinitions();
+    return metas.map((meta) => knownIdKey(parseId(meta.vendorId), parseId(meta.productId)));
+  } catch {
+    return [];
+  }
+}
+
+/** 组装 listDevices 的过滤选项：includeAll 为 true 时旁路过滤（调试/救急）。 */
+async function buildListOptions(includeAll: boolean): Promise<ListDevicesOptions> {
+  return { includeAll, knownIds: await knownDefinitionIds() };
+}
+
+/** 句柄放在模块作用域：避免把不可序列化的对象放进 store 引发多余重渲染。 */
+let facade: DeviceFacade | null = null;
+
+export function getFacade(): DeviceFacade | null {
+  return facade;
+}
+
+const EMPTY_DEVICES: readonly HidDeviceInfo[] = [];
+
+export const useDeviceStore = create<DeviceState>((set, get) => ({
+  transportKind: 'dummy',
+  devices: EMPTY_DEVICES,
+  selectedDeviceId: null,
+  state: 'disconnected',
+  handshake: null,
+  layoutOptions: 0,
+  error: null,
+  busy: false,
+  showAllDevices: false,
+  scanSummary: null,
+
+  setShowAllDevices: (value) => {
+    set({ showAllDevices: value });
+    // 开关一变就重扫：否则用户看到的还是上一次过滤的结果
+    void get().refreshDevices();
+  },
+
+  setTransportKind: (transportKind) => set({ transportKind, devices: EMPTY_DEVICES, selectedDeviceId: null }),
+
+  refreshDevices: async () => {
+    const { transportKind, showAllDevices } = get();
+    try {
+      const transport = createTransport({ kind: transportKind, dummy: dummyConfigFromDefinition() });
+      const devices = await transport.listDevices(await buildListOptions(showAllDevices));
+      set({
+        devices,
+        scanSummary: transport.lastScan ?? null,
+        selectedDeviceId: get().selectedDeviceId ?? devices[0]?.id ?? null,
+      });
+    } catch (e) {
+      set({ error: toErrorInfo(e).message });
+    }
+  },
+
+  selectDevice: (selectedDeviceId) => set({ selectedDeviceId }),
+
+  connect: async (deviceId) => {
+    const { transportKind, devices } = get();
+    const id = deviceId ?? get().selectedDeviceId;
+    set({ state: 'connecting', error: null, busy: true });
+    try {
+      const transport = createTransport({ kind: transportKind, dummy: dummyConfigFromDefinition() });
+      const list = devices.length > 0 ? devices : await transport.listDevices(await buildListOptions(get().showAllDevices));
+      const device = list.find((d) => d.id === id) ?? list[0];
+      if (!device) {
+        set({ state: 'error', error: '未找到可用设备', busy: false });
+        return false;
+      }
+      // 先按设备的 VID/PID 自动切换到定义库里对应的配置，再判断是否已具备可用定义
+      const definition = await ensureDefinitionForDevice(device);
+      if (!definition) {
+        set({ state: 'error', error: '请先导入定义文件', busy: false });
+        return false;
+      }
+      facade = createDeviceFacade(transport, device, {
+        definition,
+        onFrame: (record) => useDebugStore.getState().pushFrame(record),
+        onWarning: (warning) => useDebugStore.getState().pushWarning(warning),
+      });
+      const result = await facade.connect();
+      set({ state: 'connected', handshake: result, layoutOptions: result.layoutOptions, busy: false, devices: list });
+      await get().reloadKeymap();
+      return true;
+    } catch (e) {
+      const info = toErrorInfo(e);
+      set({ state: 'error', error: info.message, busy: false });
+      useDebugStore.getState().pushWarning({
+        level: 'warn',
+        title: '连接失败',
+        detail: info.message,
+        rawHex: info.rawHex,
+      });
+      facade = null;
+      return false;
+    }
+  },
+
+  disconnect: async () => {
+    try {
+      await facade?.disconnect();
+    } catch {
+      // 断开失败也要重置本地态
+    }
+    facade = null;
+    set({ state: 'disconnected', handshake: null, busy: false });
+    useKeymapStore.getState().reset();
+    useMenuStore.getState().reset();
+  },
+
+  reloadKeymap: async () => {
+    const active = facade;
+    if (!active) return;
+    const keymap = useKeymapStore.getState();
+    const layerCount = active.getLayerCount();
+    keymap.setLoading(true, 0);
+    try {
+      const layers: Uint16Array[] = [];
+      for (let layer = 0; layer < layerCount; layer += 1) {
+        layers.push(await active.getKeymap(layer));
+        keymap.setLoading(true, Math.round(((layer + 1) / layerCount) * 100));
+      }
+      const definition = useDefinitionStore.getState().definition;
+      useKeymapStore.getState().setLayers(
+        layers,
+        definition?.matrix.rows ?? 0,
+        definition?.matrix.cols ?? 0,
+      );
+      set({ layoutOptions: await active.getLayoutOptions() });
+      keymap.setLoading(false, 100);
+    } catch (e) {
+      keymap.setLoading(false, 0);
+      set({ error: toErrorInfo(e).message });
+    }
+  },
+
+  applyKeycode: async (layer, row, col, keycode) => {
+    const active = facade;
+    if (!active) return false;
+    set({ busy: true });
+    try {
+      await active.setKeycode(layer, row, col, keycode);
+      useKeymapStore.getState().setKeycode(layer, row, col, keycode);
+      useKeymapStore.getState().markClean(layer, row, col);
+      set({ busy: false, error: null });
+      return true;
+    } catch (e) {
+      set({ busy: false, error: toErrorInfo(e).message });
+      return false;
+    }
+  },
+
+  applyLayoutOptions: async (value) => {
+    const active = facade;
+    if (!active) return;
+    try {
+      await active.setLayoutOptions(value);
+      set({ layoutOptions: value });
+    } catch (e) {
+      set({ error: toErrorInfo(e).message });
+    }
+  },
+
+  // —— 菜单 ——
+
+  menuLoad: async (menuId) => {
+    const active = facade;
+    const definition = useDefinitionStore.getState().definition;
+    if (!active || !definition) return;
+    if (useMenuStore.getState().loadedMenus.has(menuId)) return;
+    const controls = definition.controlsByMenu.get(menuId) ?? [];
+    const menu = useMenuStore.getState();
+    menu.setStatus('loading', 0, null);
+    const entries: ValueEntry[] = [];
+    let done = 0;
+    for (const control of controls) {
+      try {
+        entries.push({ control, value: await active.readValue(control) });
+      } catch {
+        // 单个控件读失败不阻断整菜单：保留默认值，错误已由门面记录到调试面板
+      }
+      done += 1;
+      if (done % 8 === 0 || done === controls.length) {
+        useMenuStore
+          .getState()
+          .setStatus('loading', Math.round((done / Math.max(1, controls.length)) * 100));
+      }
+    }
+    useMenuStore.getState().hydrate(menuId, entries);
+    useMenuStore.getState().setStatus('ready', 100);
+  },
+
+  menuCommit: async (control, value) => {
+    const active = facade;
+    if (!active) return false;
+    const next = clampValue(control, value);
+    const before = readValue(useMenuStore.getState(), control);
+    // 乐观更新：同一地址的全部控件（快捷入口）立即同步刷新
+    useMenuStore.getState().setValue(control, next);
+    try {
+      if (control.type === 'range' || control.type === 'color') {
+        // 拖动/取色是高频输入，必须防抖，否则会把 EEPROM 写穿
+        active.writeValueDebounced(control, next);
+      } else {
+        await active.writeValueNow(control, next);
+      }
+      active.session.pushChange({ kind: 'value', target: control.id, before, after: next });
+      return true;
+    } catch (e) {
+      const info = toErrorInfo(e);
+      set({ error: info.message });
+      useDebugStore.getState().pushWarning({
+        level: 'warn',
+        title: '控件写入失败',
+        detail: `${control.label || control.valueKey}：${info.message}`,
+        rawHex: info.rawHex,
+      });
+      return false;
+    }
+  },
+
+  menuTrigger: async (control) => {
+    const active = facade;
+    if (!active) return false;
+    set({ busy: true, error: null });
+    try {
+      // options 字节原样透传（含那个 [1]）——UI 上看不出差别，只有报文能证伪
+      await active.triggerAction(control);
+      // 动作可能让设备重启或进入 bootloader：探活，失败即按断开处理
+      let alive = true;
+      try {
+        await active.protocol.getProtocolVersion();
+      } catch (e) {
+        alive = !isGoneError(e);
+      }
+      if (!alive) {
+        await get().disconnect();
+        useDebugStore.getState().pushWarning({
+          level: 'warn',
+          title: '设备已断开',
+          detail: '动作执行后设备无响应，可能已重启或进入了 bootloader',
+        });
+      }
+      set({ busy: false });
+      return true;
+    } catch (e) {
+      const info = toErrorInfo(e);
+      set({ busy: false, error: info.message });
+      useDebugStore.getState().pushWarning({
+        level: 'warn',
+        title: '动作执行失败',
+        detail: `${control.label || control.valueKey}：${info.message}`,
+        rawHex: info.rawHex,
+      });
+      return false;
+    }
+  },
+
+  menuSaveAll: async () => {
+    const active = facade;
+    const definition = useDefinitionStore.getState().definition;
+    if (!active || !definition) return 0;
+    set({ busy: true });
+    try {
+      await active.flushWrites();
+      const dirtyIds = [...useMenuStore.getState().dirty];
+      // 同一地址只需保存一次（快捷入口的两个控件指向同一地址）
+      const seen = new Set<string>();
+      const targets: ControlSpec[] = [];
+      for (const id of dirtyIds) {
+        const control = definition.controlById.get(id);
+        if (!control) continue;
+        const key = addressKey(control.address);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        targets.push(control);
+      }
+      for (const control of targets) {
+        await active.saveValue(control);
+        useMenuStore.getState().markClean(control.id);
+      }
+      set({ busy: false });
+      return targets.length;
+    } catch (e) {
+      set({ busy: false, error: toErrorInfo(e).message });
+      return 0;
+    }
+  },
+
+  undoLast: async () => {
+    const active = facade;
+    if (!active) return false;
+    const entry = active.session.popChange();
+    if (!entry) return false;
+    if (entry.kind === 'value') {
+      const definition = useDefinitionStore.getState().definition;
+      const control = definition?.controlById.get(entry.target);
+      if (!control) return false;
+      return get().menuCommit(control, entry.before);
+    }
+    if (entry.kind === 'layoutOptions') {
+      await get().applyLayoutOptions(entry.before);
+      return true;
+    }
+    const parts = entry.target.split(':').map((n) => Number.parseInt(n, 10));
+    const layer = parts[0] ?? 0;
+    const row = parts[1] ?? 0;
+    const col = parts[2] ?? 0;
+    return get().applyKeycode(layer, row, col, entry.before);
+  },
+
+  undoDepth: () => facade?.session.undoDepth ?? 0,
+
+  deviceEepromReset: async () => {
+    const active = facade;
+    if (!active) return false;
+    set({ busy: true });
+    try {
+      await active.eepromReset();
+      // 复位后内存中的值全部作废，强制下次打开菜单重新拉取
+      useMenuStore.getState().reset();
+      await get().reloadKeymap();
+      set({ busy: false });
+      return true;
+    } catch (e) {
+      set({ busy: false, error: toErrorInfo(e).message });
+      return false;
+    }
+  },
+
+  // —— 备份 ——
+
+  macroGetBuffer: async (offset, size) => {
+    const active = facade;
+    if (!active) return new Uint8Array(size);
+    return active.getMacroBuffer(offset, size);
+  },
+
+  macroSetBuffer: async (offset, data) => {
+    const active = facade;
+    if (!active) return;
+    await active.setMacroBuffer(offset, data);
+  },
+
+  backupExport: () => {
+    const definition = useDefinitionStore.getState().definition;
+    if (!definition) return null;
+    const keymap = useKeymapStore.getState();
+    const values: Record<string, number> = {};
+    for (const control of definition.controls) {
+      values[control.id] = readValue(useMenuStore.getState(), control);
+    }
+    return buildBackup({
+      definition,
+      layers: keymap.layers,
+      layoutOptions: get().layoutOptions,
+      values,
+    });
+  },
+
+  backupImport: async (parsed) => {
+    const active = facade;
+    const definition = useDefinitionStore.getState().definition;
+    if (!active || !definition || !parsed.ok) return { applied: 0, missing: 0 };
+    set({ busy: true });
+    try {
+      const { entries, missing } = applyBackup(definition, parsed.backup);
+      for (const entry of entries) {
+        await get().menuCommit(entry.control, entry.value);
+      }
+      await active.flushWrites();
+      // 布局选项与键位一并还原
+      await get().applyLayoutOptions(parsed.backup.layoutOptions);
+      for (let layer = 0; layer < parsed.backup.layers.length; layer += 1) {
+        const data = parsed.backup.layers[layer];
+        if (!data) continue;
+        for (let i = 0; i < data.length; i += 1) {
+          const col = i % Math.max(1, definition.matrix.cols);
+          const row = Math.floor(i / Math.max(1, definition.matrix.cols));
+          const keycode = data[i] ?? 0;
+          if (selectKeycode(useKeymapStore.getState(), layer, row, col) === keycode) continue;
+          await get().applyKeycode(layer, row, col, keycode);
+        }
+      }
+      set({ busy: false });
+      return { applied: entries.length, missing };
+    } catch (e) {
+      set({ busy: false, error: toErrorInfo(e).message });
+      return { applied: 0, missing: 0 };
+    }
+  },
+}));
+
+/** Dummy 使用当前定义文件的 VID/PID 与矩阵尺寸（架构 U7）。 */
+export function dummyConfigFromDefinition(): Partial<DummyConfig> {
+  const definition = useDefinitionStore.getState().definition;
+  if (!definition) return {};
+  return {
+    vendorId: definition.vid,
+    productId: definition.pid,
+    rows: definition.matrix.rows,
+    cols: definition.matrix.cols,
+    layerCount: 4,
+  };
+}

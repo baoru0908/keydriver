@@ -1,0 +1,212 @@
+/* 设计令牌 + 基础层：Tailwind 4 CSS-first @theme（PRD §7.4 色板）。
+ *
+ * 主题策略（T03-1）：默认深色——@theme 基值即深色；浅色仅在 `html.theme-light` 下覆盖变量。
+ * 已删除 `@custom-variant dark`：深浅切换完全由 CSS 变量覆盖实现，组件统一使用语义色工具类。
+ * 挂载点：<html> 上的 `.theme-dark` / `.theme-light`（见 useUiStore / App）。
+ */
+@import 'tailwindcss';
+
+@theme {
+  /* —— 配色（基值 = 深色；浅色见 .theme-light 覆盖）—— */
+  --color-bg: #0f1115;
+  --color-surface: #161a21;
+  --color-panel: #1a1d24;
+  --color-elevated: #21262f;
+  --color-border: #2a313d;
+  --color-border-strong: #3a4353;
+  --color-fg: #e6e8ee;
+  --color-fg-muted: #98a2b3;
+  --color-fg-dim: #6b7484;
+  --color-accent: #4dd4c0;
+  --color-accent-strong: #35b8a5;
+  --color-accent-soft: #16342f;
+  --color-danger: #ff6b6b;
+  --color-danger-soft: #3a1f22;
+  --color-warn: #ffb86b;
+  --color-warn-soft: #3a2c1a;
+  --color-key-base: #2a303b;
+  --color-key-mod: #333b48;
+  --color-key-accent: #3d4757;
+  --color-key-special: #232833;
+  /* 语义色（成功 / 信息）+ 对应 soft 底色 */
+  --color-success: #34d399;
+  --color-success-soft: #0f2e25;
+  --color-info: #60a5fa;
+  --color-info-soft: #16263a;
+
+  /* —— 圆角 —— */
+  --radius-card: 8px;
+  --radius-key: 5px;
+
+  /* —— 字号标尺（display / title / body / caption）——
+     基准正文 13px（body 由 index.css 基础层设置），caption 11px 用于次要标注。 */
+  --text-display: 1.25rem; /* 20px */
+  --text-display--line-height: 1.2;
+  --text-display--font-weight: 700;
+  --text-title: 0.9375rem; /* 15px */
+  --text-title--line-height: 1.4;
+  --text-title--font-weight: 600;
+  --text-body: 0.8125rem; /* 13px（基准正文）*/
+  --text-body--line-height: 1.5;
+  --text-body--font-weight: 400;
+  --text-caption: 0.6875rem; /* 11px */
+  --text-caption--line-height: 1.4;
+  --text-caption--font-weight: 500;
+
+  /* —— 高程 / 阴影（panel → modal 递增）—— */
+  --shadow-e1: 0 1px 2px rgb(0 0 0 / 0.24);
+  --shadow-e2: 0 2px 8px rgb(0 0 0 / 0.28);
+  --shadow-e3: 0 12px 32px rgb(0 0 0 / 0.34);
+  --shadow-e4: 0 24px 64px rgb(0 0 0 / 0.42);
+  --ring-focus: 0 0 0 2px var(--color-accent);
+  --blur-overlay: 8px;
+
+  /* —— 动效令牌（T03-2）—— */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-emphasized: cubic-bezier(0.3, 0, 0, 1);
+  /* 减动开关：1 表示允许动效；实际降级由 @media (prefers-reduced-motion) 控制 */
+  --motion-reduce: 1;
+}
+
+/* 浅色主题：只覆盖变量，所有 Tailwind 工具类自动生效 */
+html.theme-light {
+  --color-bg: #f4f6fa;
+  --color-surface: #ffffff;
+  --color-panel: #eef1f6;
+  --color-elevated: #ffffff;
+  --color-border: #d7dce5;
+  --color-border-strong: #b9c1ce;
+  --color-fg: #1a1d24;
+  --color-fg-muted: #5a6473;
+  --color-fg-dim: #8b94a3;
+  --color-accent: #1fa894;
+  --color-accent-strong: #17806f;
+  --color-accent-soft: #ddf3ef;
+  --color-danger-soft: #fdeaea;
+  --color-warn-soft: #fdf1e0;
+  --color-key-base: #e6eaf1;
+  --color-key-mod: #d3dae6;
+  --color-key-accent: #c2ccdb;
+  --color-key-special: #eff2f7;
+  --color-success-soft: #d8f3ea;
+  --color-info-soft: #dce8fb;
+
+  /* 浅色下阴影更轻、更暖，避免糊成一片 */
+  --shadow-e1: 0 1px 2px rgb(15 23 42 / 0.08);
+  --shadow-e2: 0 2px 8px rgb(15 23 42 / 0.1);
+  --shadow-e3: 0 12px 32px rgb(15 23 42 / 0.14);
+  --shadow-e4: 0 24px 64px rgb(15 23 42 / 0.2);
+  --ring-focus: 0 0 0 2px var(--color-accent);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-bg);
+    color: var(--color-fg);
+    font-family:
+      -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+      'Microsoft YaHei', sans-serif;
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border-strong);
+    border-radius: 5px;
+    border: 2px solid var(--color-bg);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-fg-dim);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * T03-2 零成本动效体系：关键帧 + 工具类（纯 CSS，零 JS 依赖）。
+ * 时长/缓动用上面的 motion 令牌；实际降级见文末 prefers-reduced-motion。
+ * ════════════════════════════════════════════════════════════════════════ */
+@keyframes kd-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes kd-slide {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes kd-scale {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@utility animate-fade {
+  animation: kd-fade var(--duration-base) var(--ease-standard) both;
+}
+
+@utility animate-slide {
+  animation: kd-slide var(--duration-base) var(--ease-standard) both;
+}
+
+@utility animate-scale {
+  animation: kd-scale var(--duration-slow) var(--ease-emphasized) both;
+}
+
+/* 键帽渐变的通用 class：按 tone 分档（架构 §8.6 三档映射） */
+@utility keycap-base {
+  box-shadow:
+    inset 0 -2px 0 rgb(0 0 0 / 0.18),
+    0 1px 2px rgb(0 0 0 / 0.25);
+}
+
+/* 尊重系统「减少动态效果」偏好：关闭所有动效与过渡（零成本、无侵入） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
