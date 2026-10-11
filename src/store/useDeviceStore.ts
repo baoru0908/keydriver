@@ -35,7 +35,7 @@ function clampValue(control: ControlSpec, value: number): number {
     const { min, max } = control.options;
     return Math.min(max, Math.max(min, Math.round(value)));
   }
-  if (control.type === 'color') return Math.max(0, Math.min(0xffffff, Math.round(value)));
+  if (control.type === 'color') return Math.max(0, Math.min(0xffff, Math.round(value)));
   return Math.round(value) >>> 0;
 }
 
@@ -80,6 +80,8 @@ interface DeviceState {
   menuTrigger: (control: ControlSpec) => Promise<boolean>;
   /** 把全部脏值刷入设备并逐个地址持久化（0x09） */
   menuSaveAll: () => Promise<number>;
+  /** 启动时自动重连上次连接过的设备（记忆在 localStorage）；无记忆/设备不在时返回 false */
+  autoReconnect: () => Promise<boolean>;
   /** 撤销会话中最近一次变更（R-P1-07） */
   undoLast: () => Promise<boolean>;
   undoDepth: () => number;
@@ -147,8 +149,71 @@ export function getFacade(): DeviceFacade | null {
 
 const EMPTY_DEVICES: readonly HidDeviceInfo[] = [];
 
+/** 记忆设备的 localStorage 键（下次启动自动重连用）。 */
+const LAST_DEVICE_KEY = 'keydriver.lastDevice';
+
+/** 按运行环境选默认传输：Tauri → 原生桥；有 WebHID → WebHID；测试/兜底 → Dummy。 */
+function defaultTransportKind(): TransportKind {
+  if (typeof window === 'undefined') return 'dummy';
+  // 测试/自动化逃生门：?transport=dummy|webhid|nodehid 强制指定（UI 不暴露入口）
+  try {
+    const forced = new URLSearchParams(window.location.search).get('transport');
+    if (forced === 'dummy' || forced === 'webhid' || forced === 'nodehid') return forced;
+  } catch {
+    // URL 解析失败按环境默认
+  }
+  if ('__TAURI_INTERNALS__' in window) return 'nodehid';
+  if (typeof navigator !== 'undefined' && 'hid' in navigator) return 'webhid';
+  return 'dummy';
+}
+
+/** 记忆本次连接成功的设备（隐私模式等 localStorage 不可用时静默跳过）。 */
+function rememberDevice(device: HidDeviceInfo): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(
+      LAST_DEVICE_KEY,
+      JSON.stringify({
+        vendorId: device.vendorId,
+        productId: device.productId,
+        productName: device.productName,
+        serialNumber: device.serialNumber ?? null,
+      }),
+    );
+  } catch {
+    // localStorage 不可用（隐私模式/配额）：记忆失败不影响连接本身
+  }
+}
+
+interface RememberedDevice {
+  readonly vendorId: number;
+  readonly productId: number;
+  readonly productName: string;
+  readonly serialNumber: string | null;
+}
+
+function readRememberedDevice(): RememberedDevice | null {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LAST_DEVICE_KEY);
+    if (raw === null) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      typeof (parsed as RememberedDevice).vendorId === 'number' &&
+      typeof (parsed as RememberedDevice).productId === 'number'
+    ) {
+      return parsed as RememberedDevice;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export const useDeviceStore = create<DeviceState>((set, get) => ({
-  transportKind: 'dummy',
+  transportKind: defaultTransportKind(),
   devices: EMPTY_DEVICES,
   selectedDeviceId: null,
   state: 'disconnected',
@@ -215,6 +280,7 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
       });
       const result = await facade.connect();
       set({ state: 'connected', handshake: result, layoutOptions: result.layoutOptions, busy: false, devices: list });
+      rememberDevice(device);
       await get().reloadKeymap();
       return true;
     } catch (e) {
@@ -250,6 +316,30 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
     set({ state: 'disconnected', handshake: null, busy: false });
     useKeymapStore.getState().reset();
     useMenuStore.getState().reset();
+  },
+
+  /**
+   * 启动自动重连：读取记忆的上次设备，在当前列表里按 VID/PID（+序列号）匹配后静默重连。
+   * 记忆在每次 connect 成功时写入（rememberDevice）；拔出/lost 不清除——设备重新插上仍可连。
+   * AppShell 挂载时调用一次。
+   */
+  autoReconnect: async () => {
+    const saved = readRememberedDevice();
+    if (saved === null) return false;
+    await get().refreshDevices();
+    const devices = get().devices;
+    // ⚠️ 必须限 viaCapable：键盘的非 VIA 接口（标准键盘/HID 接口）vid/pid/序列号完全相同，
+    // 只按 vid/pid 匹配会连到打字接口上——握手必败，表现为「假连接」
+    const match = devices.find(
+      (d) =>
+        d.viaCapable === true &&
+        d.vendorId === saved.vendorId &&
+        d.productId === saved.productId &&
+        (saved.serialNumber === null || d.serialNumber === saved.serialNumber),
+    );
+    if (!match) return false;
+    const ok = await get().connect(match.id);
+    return ok;
   },
 
   /**
@@ -570,4 +660,62 @@ export function dummyConfigFromDefinition(): Partial<DummyConfig> {
     cols: definition.matrix.cols,
     layerCount: 4,
   };
+}
+
+// —— 热插拔看门狗（R3 补全）——
+// hidapi 没有设备到达事件（macOS），WebHID 的 connect 事件在部分内核也不可靠；
+// 未连接状态下周期性重扫设备列表：插上键盘 → 列表自动出现 → 记忆设备自动重连。
+const HOTPLUG_INTERVAL_MS = 2000;
+
+let watchTimer: ReturnType<typeof setInterval> | null = null;
+/** 防重入：上一轮枚举还没回来时不叠加（枚举走 IPC/USB，串行最稳）。 */
+let polling = false;
+
+/**
+ * 单次到达轮询（导出仅供测试与看门狗复用）：
+ *  - 仅在 disconnected / lost 态生效（connected 有断连轮询管，error 交给用户处理）；
+ *  - 发现记忆设备（viaCapable + VID/PID + 序列号）即静默重连。
+ */
+export async function pollDeviceArrivalOnce(): Promise<void> {
+  if (polling) return;
+  const { state, busy } = useDeviceStore.getState();
+  if (busy || (state !== 'disconnected' && state !== 'lost')) return;
+  polling = true;
+  try {
+    await useDeviceStore.getState().refreshDevices();
+    const saved = readRememberedDevice();
+    if (saved === null) return;
+    // 与 autoReconnect 同一套匹配口径：必须限 viaCapable（多接口复合设备的 vid/pid 相同）
+    const match = useDeviceStore
+      .getState()
+      .devices.find(
+        (d) =>
+          d.viaCapable === true &&
+          d.vendorId === saved.vendorId &&
+          d.productId === saved.productId &&
+          (saved.serialNumber === null || d.serialNumber === saved.serialNumber),
+      );
+    if (match) await useDeviceStore.getState().connect(match.id);
+  } catch {
+    // 轮询失败静默：下一轮再试
+  } finally {
+    polling = false;
+  }
+}
+
+/** 启动热插拔看门狗（幂等）。AppShell 挂载时调用。 */
+export function startHotplugWatch(): void {
+  if (watchTimer !== null || typeof window === 'undefined') return;
+  watchTimer = setInterval(() => {
+    void pollDeviceArrivalOnce();
+  }, HOTPLUG_INTERVAL_MS);
+}
+
+/** 停止看门狗（测试清理用）。 */
+export function stopHotplugWatch(): void {
+  if (watchTimer !== null) {
+    clearInterval(watchTimer);
+    watchTimer = null;
+  }
+  polling = false;
 }

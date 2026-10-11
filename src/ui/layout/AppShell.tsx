@@ -9,6 +9,7 @@ import { PanelRightOpen } from 'lucide-react';
 import { useUiStore } from '@/store/useUiStore';
 import { useKeymapStore } from '@/store/useKeymapStore';
 import { useMenuStore } from '@/store/useMenuStore';
+import { useDeviceStore, startHotplugWatch } from '@/store/useDeviceStore';
 import { getBridge } from '@/shared/bridge';
 import { createDirtyReporter } from '@/shared/dirtyCount';
 import { useBreakpoint } from '@/shared/useBreakpoint';
@@ -60,6 +61,9 @@ export interface AppShellProps {
   readonly onImportDefinition: () => void;
 }
 
+/** autoReconnect 只跑一次的标记（模块级，StrictMode 双挂载防护）。 */
+let autoReconnectStarted = false;
+
 export function AppShell({ onImportDefinition }: AppShellProps): React.JSX.Element {
   const currentPanel = useUiStore((s) => s.currentPanel);
   const sidebarOpen = useUiStore((s) => s.sidebarOpen);
@@ -78,6 +82,16 @@ export function AppShell({ onImportDefinition }: AppShellProps): React.JSX.Eleme
     }
     prevNarrow.current = narrow;
   });
+
+  // 启动自动重连：曾连接过的设备在列表里出现即静默重连。
+  // 模块级标记防 StrictMode 双跑（双重 connect 会互相踢掉 facade，表现为「假连接」）。
+  // 热插拔看门狗：启动时键盘不在位 → 插上后 2s 内自动出现在列表并重连（幂等，重复调用无害）。
+  useEffect(() => {
+    startHotplugWatch();
+    if (autoReconnectStarted) return;
+    autoReconnectStarted = true;
+    void useDeviceStore.getState().autoReconnect();
+  }, []);
 
   // T06-3：把两个 store 的脏计数聚合后经唯一 bridge 推给主进程（关窗拦截门控）。
   useEffect(() => {
