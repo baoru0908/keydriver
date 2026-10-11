@@ -27,19 +27,23 @@ export function StatusBar(): React.JSX.Element {
         ? '连接中…'
         : state === 'error'
           ? (error ?? '连接错误')
-          : '未连接';
+          : state === 'lost'
+            ? '设备已断开'
+            : '未连接';
 
   const connected = shouldShowConnectionInfo(state);
   const gotoDebug = (): void => setCurrentPanel('debug');
 
   return (
-    <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 text-[11px] text-fg-muted">
+    <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-surface px-3 text-caption text-fg-muted">
       {connected ? (
         busy ? (
           <Loader2 size={12} className="animate-spin text-warn" />
         ) : (
           <CheckCircle2 size={12} className="text-accent" />
         )
+      ) : state === 'lost' ? (
+        <AlertTriangle size={12} className="text-danger" />
       ) : (
         <Activity size={12} />
       )}

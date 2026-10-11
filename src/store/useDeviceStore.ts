@@ -16,6 +16,8 @@ import { useDebugStore } from './useDebugStore';
 import { useDefinitionStore } from './useDefinitionStore';
 import { useKeymapStore, selectKeycode } from './useKeymapStore';
 import { toErrorInfo } from '@/shared/result';
+import { toast } from '@/ui/primitives/Toast';
+import type { Unsubscribe } from '@/core/hid/HidTransport';
 
 /** 判断异常是否意味着「设备已经不在了」（重启 / 进入 bootloader / 被拔出）。 */
 function isGoneError(e: unknown): boolean {
@@ -37,7 +39,12 @@ function clampValue(control: ControlSpec, value: number): number {
   return Math.round(value) >>> 0;
 }
 
-export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
+/**
+ * 连接态（T06-2 增 'lost'）：
+ *  - 'lost' = 意外断连（设备被拔出 / 重启 / 进 bootloader），**刻意与主动断开区分**：
+ *    保留键位与菜单的脏值（不 reset），供重连后继续编辑。
+ */
+export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error' | 'lost';
 
 interface DeviceState {
   transportKind: TransportKind;
@@ -58,6 +65,8 @@ interface DeviceState {
   selectDevice: (id: string | null) => void;
   connect: (deviceId?: string) => Promise<boolean>;
   disconnect: () => Promise<void>;
+  /** 意外断连处理：置 lost、清 facade/handshake，但保留键位/菜单脏值（禁 reset）。 */
+  handleLost: (reason: string) => void;
   /** 连接后拉取全部层键位 */
   reloadKeymap: () => Promise<void>;
   applyKeycode: (layer: number, row: number, col: number, keycode: number) => Promise<boolean>;
@@ -124,6 +133,13 @@ async function buildListOptions(includeAll: boolean): Promise<ListDevicesOptions
 
 /** 句柄放在模块作用域：避免把不可序列化的对象放进 store 引发多余重渲染。 */
 let facade: DeviceFacade | null = null;
+/** 当前 facade 所用传输层的断连订阅退订函数（T06-2）。 */
+let unsubscribeDisconnect: Unsubscribe | null = null;
+/**
+ * 主动断开守卫（T06-2 正确性前提）：disconnect() 全程置位，
+ * 防止主动 close 过程中（或竞态窗口内）传输层的断连事件把状态误标为 'lost'。
+ */
+let intentionalClose = false;
 
 export function getFacade(): DeviceFacade | null {
   return facade;
@@ -191,6 +207,12 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
         onFrame: (record) => useDebugStore.getState().pushFrame(record),
         onWarning: (warning) => useDebugStore.getState().pushWarning(warning),
       });
+      // T06-2：订阅传输层断连事件（Dummy 的 simulateDisconnect / WebHID 的 disconnect）
+      // → 走 lost 状态机。旧订阅先退订，防重复触发。
+      unsubscribeDisconnect?.();
+      unsubscribeDisconnect = transport.onDisconnect((info) => {
+        get().handleLost(`设备「${info.productName}」已从系统中移除`);
+      });
       const result = await facade.connect();
       set({ state: 'connected', handshake: result, layoutOptions: result.layoutOptions, busy: false, devices: list });
       await get().reloadKeymap();
@@ -205,20 +227,49 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
         rawHex: info.rawHex,
       });
       facade = null;
+      // 连接失败即丢弃 transport：必须退订本次订阅的断连监听，
+      // 否则残留回调会在用户之后拔设备时把 'error' 态误报成 'lost' 并弹 Toast。
+      unsubscribeDisconnect?.();
+      unsubscribeDisconnect = null;
       return false;
     }
   },
 
   disconnect: async () => {
+    // T06-2：先置位守卫再断开——主动断开期间传输层若冒出断连事件，不得误报 lost。
+    intentionalClose = true;
     try {
       await facade?.disconnect();
     } catch {
       // 断开失败也要重置本地态
     }
+    unsubscribeDisconnect?.();
+    unsubscribeDisconnect = null;
     facade = null;
+    intentionalClose = false;
     set({ state: 'disconnected', handshake: null, busy: false });
     useKeymapStore.getState().reset();
     useMenuStore.getState().reset();
+  },
+
+  /**
+   * 意外断连（T06-2）：置 lost、清 facade/handshake、busy 复位（写队列随 facade 丢弃，
+   * flushWrites 失败由 ValueWriteQueue.onError 静默记录）。
+   * ⚠️ 刻意**不调用** useKeymapStore.reset() / useMenuStore.reset()：断连保留脏值，
+   * 与主动断开（disconnect，全部重置）区分，重连后用户可继续编辑。
+   */
+  handleLost: (reason) => {
+    if (intentionalClose) return;
+    facade = null;
+    unsubscribeDisconnect?.();
+    unsubscribeDisconnect = null;
+    set({ state: 'lost', handshake: null, busy: false, error: reason });
+    toast.error('设备已断开');
+    useDebugStore.getState().pushWarning({
+      level: 'warn',
+      title: '设备已断开',
+      detail: reason,
+    });
   },
 
   reloadKeymap: async () => {
@@ -347,12 +398,8 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
         alive = !isGoneError(e);
       }
       if (!alive) {
-        await get().disconnect();
-        useDebugStore.getState().pushWarning({
-          level: 'warn',
-          title: '设备已断开',
-          detail: '动作执行后设备无响应，可能已重启或进入了 bootloader',
-        });
+        // 动作后设备消失属「意外断连」：走 lost 状态机保留脏值（主动 disconnect 会清空）
+        get().handleLost('动作执行后设备无响应，可能已重启或进入了 bootloader');
       }
       set({ busy: false });
       return true;

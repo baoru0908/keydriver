@@ -24,6 +24,7 @@ export function connectionStateLabel(state: ConnectionState): string {
   if (state === 'connected') return '已连接';
   if (state === 'connecting') return '连接中';
   if (state === 'error') return '连接异常';
+  if (state === 'lost') return '设备已断开';
   return '未连接';
 }
 

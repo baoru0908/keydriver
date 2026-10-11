@@ -5,7 +5,9 @@ import { useDefinitionStore } from '@/store/useDefinitionStore';
 import { useDeviceStore } from '@/store/useDeviceStore';
 import { useMenuStore, readValue } from '@/store/useMenuStore';
 import { Button } from '@/ui/primitives/Button';
+import { Card } from '@/ui/primitives/Card';
 import { ConfirmDialog } from '@/ui/primitives/ConfirmDialog';
+import { ErrorState } from '@/ui/primitives/ErrorState';
 import { toast } from '@/ui/primitives/Toast';
 import { downloadBackup, pickBackupFile } from '@/io/download';
 import { describeBackup, diffBackup, type BackupFile } from '@/io/backup';
@@ -28,6 +30,9 @@ export function BackupPanel({ disabled }: BackupPanelProps): React.JSX.Element {
   const busy = useDeviceStore((s) => s.busy);
   const [pending, setPending] = useState<BackupFile | null>(null);
   const [diff, setDiff] = useState<readonly DiffRow[] | null>(null);
+  // T06-4/T06-7：失败反馈除 Toast 外，同时内联 ErrorState（含字段级原因/明细），可重试
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const onExport = (): void => {
     const backup = backupExport();
@@ -43,9 +48,13 @@ export function BackupPanel({ disabled }: BackupPanelProps): React.JSX.Element {
     const parsed = await pickBackupFile();
     if (parsed === null) return;
     if (!parsed.ok) {
+      setParseError(parsed.error);
+      setPending(null);
       toast.error(parsed.error);
       return;
     }
+    setParseError(null);
+    setImportError(null);
     setPending(parsed.backup);
     setDiff(null);
   };
@@ -54,9 +63,12 @@ export function BackupPanel({ disabled }: BackupPanelProps): React.JSX.Element {
     if (!pending) return;
     const result = await backupImport({ ok: true, backup: pending });
     if (result.applied === 0) {
-      toast.error('没有任何控件被还原——备份与当前定义文件可能不匹配');
+      const message = '没有任何控件被还原——备份与当前定义文件可能不匹配';
+      setImportError(message);
+      toast.error(message);
       return;
     }
+    setImportError(null);
     // 导入后逐项读回比对（验收 3：导出 → 复位 → 导入 → 逐项一致）
     const definitionNow = useDefinitionStore.getState().definition;
     if (!definitionNow) return;
@@ -77,10 +89,10 @@ export function BackupPanel({ disabled }: BackupPanelProps): React.JSX.Element {
   };
 
   return (
-    <div className="flex flex-col gap-3 rounded-card border border-border bg-surface p-4">
+    <Card className="flex flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-medium text-fg">配置备份</h2>
-        <span className="text-[11px] text-fg-dim">
+        <span className="text-caption text-fg-dim">
           主键为 controlId（valueKey 有 2 处重名，不能做主键）
         </span>
         <div className="ml-auto flex items-center gap-2">
@@ -100,8 +112,27 @@ export function BackupPanel({ disabled }: BackupPanelProps): React.JSX.Element {
         </div>
       </div>
 
+      {parseError ? (
+        <ErrorState
+          title="备份文件解析失败"
+          description="请检查文件内容后重试；常见原因是选错文件或备份被手工修改。"
+          detail={parseError}
+          retryLabel="重新选择文件"
+          onRetry={() => void onPick()}
+        />
+      ) : null}
+
+      {importError ? (
+        <ErrorState
+          title="导入未生效"
+          description={importError}
+          retryLabel="重新选择文件"
+          onRetry={() => void onPick()}
+        />
+      ) : null}
+
       {pending ? (
-        <div className="rounded border border-border bg-elevated px-3 py-2 text-[11px] text-fg-muted">
+        <div className="rounded border border-border bg-elevated px-3 py-2 text-caption text-fg-muted">
           {describeBackup(pending)}
         </div>
       ) : null}
@@ -109,9 +140,9 @@ export function BackupPanel({ disabled }: BackupPanelProps): React.JSX.Element {
       {diff !== null ? (
         <div className="max-h-56 overflow-auto rounded border border-border">
           {diff.length === 0 ? (
-            <div className="px-3 py-2 text-[11px] text-accent">逐项比对通过，完全一致</div>
+            <div className="px-3 py-2 text-caption text-accent">逐项比对通过，完全一致</div>
           ) : (
-            <table className="w-full text-[11px]">
+            <table className="w-full text-caption">
               <thead className="sticky top-0 bg-elevated text-fg-dim">
                 <tr>
                   <th className="px-2 py-1 text-left font-normal">控件</th>
@@ -143,6 +174,6 @@ export function BackupPanel({ disabled }: BackupPanelProps): React.JSX.Element {
         confirmLabel="导入"
         onConfirm={() => void onConfirmImport()}
       />
-    </div>
+    </Card>
   );
 }

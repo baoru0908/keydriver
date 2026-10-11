@@ -85,20 +85,24 @@ html.theme-light {
   --color-accent: #1fa894;
   --color-accent-strong: #17806f;
   --color-accent-soft: #ddf3ef;
+  --color-danger: #d64545;
   --color-danger-soft: #fdeaea;
+  --color-warn: #c97e2e;
   --color-warn-soft: #fdf1e0;
   --color-key-base: #e6eaf1;
   --color-key-mod: #d3dae6;
   --color-key-accent: #c2ccdb;
   --color-key-special: #eff2f7;
-  --color-success-soft: #d8f3ea;
-  --color-info-soft: #dce8fb;
+  --color-success: #159c74;
+  --color-success-soft: #e3f8ef;
+  --color-info: #2f7fd6;
+  --color-info-soft: #e9f2fd;
 
-  /* 浅色下阴影更轻、更暖，避免糊成一片 */
-  --shadow-e1: 0 1px 2px rgb(15 23 42 / 0.08);
-  --shadow-e2: 0 2px 8px rgb(15 23 42 / 0.1);
-  --shadow-e3: 0 12px 32px rgb(15 23 42 / 0.14);
-  --shadow-e4: 0 24px 64px rgb(15 23 42 / 0.2);
+  /* 亮色阴影（design-tokens.md §3.2）：更轻、更暖，避免糊成一片 */
+  --shadow-e1: 0 1px 2px rgb(16 24 40 / 0.06);
+  --shadow-e2: 0 2px 8px rgb(16 24 40 / 0.08);
+  --shadow-e3: 0 8px 24px rgb(16 24 40 / 0.1);
+  --shadow-e4: 0 16px 48px rgb(16 24 40 / 0.12);
   --ring-focus: 0 0 0 2px var(--color-accent);
 }
 

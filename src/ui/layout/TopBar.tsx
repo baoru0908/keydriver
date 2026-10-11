@@ -1,6 +1,6 @@
 // 顶部设备栏：设备选择、连接状态灯、VID/PID/协议版本、主题开关、导入定义。
 import { useState } from 'react';
-import { Keyboard, Loader2, Moon, RefreshCw, Sun, Upload, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Keyboard, Loader2, Moon, RefreshCw, Sun, Upload, PanelLeftClose, PanelLeftOpen, Command } from 'lucide-react';
 import { useDeviceStore } from '@/store/useDeviceStore';
 import { useDefinitionStore } from '@/store/useDefinitionStore';
 import { useUiStore } from '@/store/useUiStore';
@@ -20,6 +20,7 @@ export function TopBar({ onImportDefinition }: { onImportDefinition: () => void 
   const sidebarOpen = useUiStore((s) => s.sidebarOpen);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const setHotkeyHelpOpen = useUiStore((s) => s.setHotkeyHelpOpen);
   const refreshDevices = useDeviceStore((s) => s.refreshDevices);
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -111,6 +112,17 @@ export function TopBar({ onImportDefinition }: { onImportDefinition: () => void 
         <Tooltip label={theme === 'dark' ? '切换浅色' : '切换深色'}>
           <Button variant="ghost" size="icon" onClick={toggleTheme} aria-label="切换主题">
             {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </Button>
+        </Tooltip>
+        {/* T06-9：快捷键帮助（与 ⌘/Ctrl+/ 同一帮助面板） */}
+        <Tooltip label="快捷键帮助">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setHotkeyHelpOpen(true)}
+            aria-label="显示快捷键帮助"
+          >
+            <Command size={15} />
           </Button>
         </Tooltip>
       </div>

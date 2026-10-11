@@ -86,6 +86,8 @@ async function main() {
     ),
   );
   execFileSync('cp', [path.join(ROOT, 'electron/main.cjs'), path.join(resApp, 'main.cjs')]);
+  // T06-3：preload.cjs 是唯一 IPC bridge，必须随主进程一并注入（main.cjs 以 __dirname 定位它）
+  execFileSync('cp', [path.join(ROOT, 'electron/preload.cjs'), path.join(resApp, 'preload.cjs')]);
 
   // dist 放 Resources/dist（与 main.cjs 的 '../dist' 对应）
   await rm(path.join(OUT_APP, 'Contents/Resources/dist'), { recursive: true, force: true });

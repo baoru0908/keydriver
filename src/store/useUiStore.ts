@@ -29,6 +29,8 @@ interface UiState extends UiPrefs {
   /** 正在等待键码选择的控件来源（'keymap' 或某个 controlId） */
   keycodeTarget: string | null;
   importDialogOpen: boolean;
+  /** 快捷键帮助弹窗（T06-9：TopBar 入口与 ⌘/ 共用） */
+  hotkeyHelpOpen: boolean;
   /** 当前打开的自定义菜单 id（来自定义文件，零硬编码） */
   currentMenuId: string | null;
   setTheme: (theme: ThemeMode) => void;
@@ -39,6 +41,7 @@ interface UiState extends UiPrefs {
   requestKeycode: (target: string) => void;
   clearKeycodeTarget: () => void;
   setImportDialogOpen: (open: boolean) => void;
+  setHotkeyHelpOpen: (open: boolean) => void;
   setCurrentMenuId: (menuId: string | null) => void;
   /** 一步切换到某个菜单面板（左侧导航用） */
   openMenu: (menuId: string) => void;
@@ -90,6 +93,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   keycodePanelOpen: true,
   keycodeTarget: null,
   importDialogOpen: false,
+  hotkeyHelpOpen: false,
   currentMenuId: null,
 
   setTheme: (theme) => {
@@ -111,6 +115,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   requestKeycode: (keycodeTarget) => set({ keycodeTarget, keycodePanelOpen: true }),
   clearKeycodeTarget: () => set({ keycodeTarget: null }),
   setImportDialogOpen: (importDialogOpen) => set({ importDialogOpen }),
+  setHotkeyHelpOpen: (hotkeyHelpOpen) => set({ hotkeyHelpOpen }),
   setCurrentMenuId: (currentMenuId) => set({ currentMenuId }),
   openMenu: (menuId) => set({ currentMenuId: menuId, currentPanel: 'menu', keycodeTarget: null }),
 

@@ -155,8 +155,8 @@ describe('宏面板 · 菜单未就绪时不渲染条件控件', () => {
     expect(html).toContain('宏菜单');
     // 核心断言：生成器一个都没渲染 —— 否则就会拿缺失变量先求值一次，条件控件先灰后亮
     expect(generatorMarks(html, menu.id)).toBe(0);
-    // 占位空态必须给出来，不能白屏
-    expect(html).toContain('控件值尚未读取完成');
+    // 占位空态必须给出来（T06-4：Skeleton 骨架容器 aria-busy），不能白屏
+    expect(html).toContain('aria-busy="true"');
   }, 60000);
 
   it('已就绪：loadedMenus 命中后正常渲染生成器', async () => {
@@ -167,7 +167,7 @@ describe('宏面板 · 菜单未就绪时不渲染条件控件', () => {
     const html = await renderPanel();
 
     expect(generatorMarks(html, menu.id)).toBe(1);
-    expect(html).not.toContain('控件值尚未读取完成');
+    expect(html).not.toContain('aria-busy="true"');
   }, 60000);
 
   it('多菜单场景：只有就绪的那一个渲染生成器，另一个仍是占位', async () => {
@@ -185,7 +185,7 @@ describe('宏面板 · 菜单未就绪时不渲染条件控件', () => {
     expect(html).toContain('待加载菜单');
     expect(generatorMarks(html, ready.id)).toBe(1);
     expect(generatorMarks(html, pending.id)).toBe(0);
-    // 恰好一条占位：未就绪的那个仍然不渲染
-    expect(html.split('控件值尚未读取完成').length - 1).toBe(1);
+    // 恰好一条骨架占位：未就绪的那个仍然不渲染
+    expect(html.split('aria-busy="true"').length - 1).toBe(1);
   }, 60000);
 });

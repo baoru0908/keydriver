@@ -1,10 +1,15 @@
 // 菜单面板：菜单 Tab（来自定义文件）+ 懒加载进度 + 生成器 + 保存栏。
 import { useEffect, useMemo } from 'react';
+import { FileJson, Usb } from 'lucide-react';
 import { useDefinitionStore } from '@/store/useDefinitionStore';
 import { useDeviceStore } from '@/store/useDeviceStore';
 import { useMenuStore } from '@/store/useMenuStore';
 import { useUiStore } from '@/store/useUiStore';
+import { Button } from '@/ui/primitives/Button';
 import { ProgressBar } from '@/ui/primitives/ProgressBar';
+import { Card } from '@/ui/primitives/Card';
+import { EmptyState } from '@/ui/primitives/EmptyState';
+import { Skeleton, SkeletonGroup } from '@/ui/primitives/Skeleton';
 import { ConnectBanner } from '@/ui/device/ConnectBanner';
 import { DevicePicker } from '@/ui/device/DevicePicker';
 import { useState } from 'react';
@@ -45,9 +50,16 @@ export function MenuPane(): React.JSX.Element {
 
   if (!definition) {
     return (
-      <div className="rounded-card border border-border bg-surface p-6 text-xs text-fg-muted">
-        请先导入定义文件。
-      </div>
+      <EmptyState
+        icon={FileJson}
+        title="尚未加载定义文件"
+        description="请先导入一份 VIA V3 定义 JSON，所有菜单文案与控件都由它驱动。"
+        action={
+          <Button variant="primary" size="sm" onClick={() => setImportDialogOpen(true)}>
+            导入定义
+          </Button>
+        }
+      />
     );
   }
 
@@ -88,15 +100,26 @@ export function MenuPane(): React.JSX.Element {
           ) : menuReady ? (
             <MenuGenerator menu={activeMenu} context={showIfContext} />
           ) : (
-            <div className="rounded-card border border-border bg-surface p-4 text-xs text-fg-dim">
-              控件值尚未读取完成，读取完成后再按条件渲染菜单内容。
-            </div>
+            <SkeletonGroup label={`正在加载 ${activeMenu.label}`} className="gap-3">
+              <Skeleton variant="text" className="w-56" />
+              <Skeleton variant="block" className="h-16" />
+              <Skeleton variant="block" className="h-16" />
+            </SkeletonGroup>
           )}
         </>
       ) : (
-        <div className="rounded-card border border-border bg-surface p-4 text-xs text-fg-dim">
-          连接设备后即可读写该菜单下的控件。
-        </div>
+        <Card className="p-6">
+          <EmptyState
+            icon={Usb}
+            title="未连接设备"
+            description="连接设备后即可读写该菜单下的控件。"
+            action={
+              <Button variant="primary" size="sm" onClick={() => setPickerOpen(true)}>
+                选择设备
+              </Button>
+            }
+          />
+        </Card>
       )}
     </div>
   );

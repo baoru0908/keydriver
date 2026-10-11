@@ -57,7 +57,7 @@ export function ToastHost(): React.JSX.Element {
         return (
           <div
             key={item.id}
-            className="pointer-events-auto flex items-start gap-2 rounded-card border border-border bg-surface px-3 py-2 text-xs shadow-lg"
+            className="pointer-events-auto flex items-start gap-2 rounded-card border border-border bg-surface px-3 py-2 text-caption shadow-e2 animate-slide"
           >
             <Icon size={14} className={`mt-0.5 shrink-0 ${color}`} />
             <span className="flex-1 text-fg">{item.message}</span>

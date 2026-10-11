@@ -1,24 +1,18 @@
-// 根组件：主题应用 + 启动引导（恢复上次定义） + 挂载四区骨架与全局提示层。
+// 根组件：主题应用（ThemeProvider → <html> class + 窗口底色同步）+ 启动引导（恢复上次定义）
+// + 挂载四区骨架与全局提示层。
 import { useEffect, useState } from 'react';
 import { AppShell } from '@/ui/layout/AppShell';
 import { ToastHost } from '@/ui/primitives/Toast';
 import { DefinitionImportDialog } from '@/ui/io/DefinitionImportDialog';
-import { useUiStore } from '@/store/useUiStore';
+import { ThemeProvider } from '@/ui/layout/ThemeProvider';
 import { useDefinitionStore } from '@/store/useDefinitionStore';
 import { loadRecentDefinition } from '@/definition/DefinitionRepository';
 import { useDeviceStore } from '@/store/useDeviceStore';
 import { useMenuStore } from '@/store/useMenuStore';
 
 export default function App(): React.JSX.Element {
-  const theme = useUiStore((s) => s.theme);
   const [importOpen, setImportOpen] = useState(false);
   const definition = useDefinitionStore((s) => s.definition);
-
-  // 主题落到 <html> 上，深浅切换由 CSS 变量覆盖实现（T03-3：.theme-dark / .theme-light）
-  useEffect(() => {
-    document.documentElement.classList.toggle('theme-dark', theme === 'dark');
-    document.documentElement.classList.toggle('theme-light', theme === 'light');
-  }, [theme]);
 
   // 启动时恢复上次使用的定义文件（IndexedDB）
   useEffect(() => {
@@ -45,10 +39,11 @@ export default function App(): React.JSX.Element {
   }, [definition]);
 
   return (
-    <>
+    // T06-3/T06-10：主题统一由 ThemeProvider 落地（<html> class + IPC bridge 同步窗口底色）
+    <ThemeProvider>
       <AppShell onImportDefinition={() => setImportOpen(true)} />
       <DefinitionImportDialog open={importOpen} onOpenChange={setImportOpen} />
       <ToastHost />
-    </>
+    </ThemeProvider>
   );
 }

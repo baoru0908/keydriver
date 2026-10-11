@@ -4,10 +4,14 @@
 // - VIA 宏区：直接读写固件的 VIA 宏缓冲区（0x0e/0x0f/0x0d），与具体键盘无关。
 // - 高级输入区：渲染定义文件中 category==='macros' 的菜单（其文案来自定义文件，零硬编码）。
 import { useEffect, useMemo, useState } from 'react';
+import { Usb } from 'lucide-react';
 import { useDeviceStore, getFacade } from '@/store/useDeviceStore';
 import { useDefinitionStore } from '@/store/useDefinitionStore';
 import { useMenuStore } from '@/store/useMenuStore';
 import { MenuGenerator } from '@/ui/menu/MenuGenerator';
+import { Card } from '@/ui/primitives/Card';
+import { EmptyState } from '@/ui/primitives/EmptyState';
+import { Skeleton, SkeletonGroup } from '@/ui/primitives/Skeleton';
 import type { MenuDef } from '@/definition/schema';
 
 /** 宏槽数量（与固件 MACRO_GET_COUNT 一致）。 */
@@ -156,9 +160,13 @@ export function MacrosPanel(): React.JSX.Element {
 
   if (!connected || !facade) {
     return (
-      <div className="rounded-card border border-border bg-surface p-6 text-xs text-fg-muted">
-        未连接设备。请在「设备」面板连接键盘后再编辑宏。
-      </div>
+      <Card className="p-6">
+        <EmptyState
+          icon={Usb}
+          title="未连接设备"
+          description="请在「设备」面板连接键盘后再编辑宏。"
+        />
+      </Card>
     );
   }
 
@@ -229,9 +237,10 @@ export function MacrosPanel(): React.JSX.Element {
           {loadedMenus.has(menu.id) ? (
             <MenuGenerator menu={menu} context={showIfContext} disabled={!connected} />
           ) : (
-            <div className="rounded-card border border-border bg-surface px-3 py-2 text-[11px] text-fg-dim">
-              控件值尚未读取完成，读取完成后再按条件渲染该菜单内容。
-            </div>
+            <SkeletonGroup label={`正在加载 ${menu.label}`} className="gap-2">
+              <Skeleton variant="block" className="h-12" />
+              <Skeleton variant="block" className="h-12" />
+            </SkeletonGroup>
           )}
         </section>
       ))}

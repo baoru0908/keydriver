@@ -17,7 +17,7 @@ export function Tooltip({ label, children, side = 'bottom' }: TooltipProps): Rea
           <TooltipPrimitive.Content
             side={side}
             sideOffset={6}
-            className="z-50 rounded bg-elevated px-2 py-1 text-[11px] text-fg shadow-lg"
+            className="z-50 rounded bg-elevated px-2 py-1 text-caption text-fg shadow-e3"
           >
             {label}
             <TooltipPrimitive.Arrow className="fill-elevated" />
