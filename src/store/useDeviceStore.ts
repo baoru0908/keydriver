@@ -75,8 +75,10 @@ interface DeviceState {
   /**
    * 懒加载某菜单的全部控件值（含被 showIf 隐藏的，因为要做条件变量）。
    * silent=true 用于连接后预载：只读不刷状态条，避免加载态闪烁。
+   * force=true 用于「从设备重新读取」：绕过 loadedMenus 守卫并先清除
+   * 回读不可信标记，让本次读取以设备为准（忽略本地缓存）。
    */
-  menuLoad: (menuId: string, options?: { readonly silent?: boolean }) => Promise<void>;
+  menuLoad: (menuId: string, options?: { readonly silent?: boolean; readonly force?: boolean }) => Promise<void>;
   /** 乐观更新内存值 + 下发写入（range/color 走 200ms 防抖） */
   menuCommit: (control: ControlSpec, value: number) => Promise<boolean>;
   /** button 类动作：options 原样透传，执行后探活，设备消失则按断开处理 */
@@ -334,10 +336,16 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
    * AppShell 挂载时调用一次。
    */
   autoReconnect: async () => {
+    const { note } = await import('@/shared/note');
     const saved = readRememberedDevice();
-    if (saved === null) return false;
+    if (saved === null) {
+      void note('auto-reconnect: no memory');
+      return false;
+    }
+    void note(`auto-reconnect: memory vid=0x${saved.vendorId.toString(16)} pid=0x${saved.productId.toString(16)}`);
     await get().refreshDevices();
     const devices = get().devices;
+    void note(`auto-reconnect: listed ${devices.length} devices`);
     // ⚠️ 必须限 viaCapable：键盘的非 VIA 接口（标准键盘/HID 接口）vid/pid/序列号完全相同，
     // 只按 vid/pid 匹配会连到打字接口上——握手必败，表现为「假连接」
     const match = devices.find(
@@ -347,8 +355,13 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
         d.productId === saved.productId &&
         (saved.serialNumber === null || d.serialNumber === saved.serialNumber),
     );
-    if (!match) return false;
+    if (!match) {
+      void note('auto-reconnect: no match');
+      return false;
+    }
+    void note(`auto-reconnect: matching ${match.productName}, initiating connection`);
     const ok = await get().connect(match.id);
+    void note(`auto-reconnect: connect=${ok ? 'ok' : 'fail'}`);
     return ok;
   },
 
@@ -431,8 +444,12 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
     const active = facade;
     const definition = useDefinitionStore.getState().definition;
     if (!active || !definition) return;
-    if (useMenuStore.getState().loadedMenus.has(menuId)) return;
     const controls = definition.controlsByMenu.get(menuId) ?? [];
+    const force = options?.force === true;
+    // 强制重读：用户显式选择信任设备——先摘掉「回读不可信」标记，
+    // 本次及后续读取都以设备回读为准（缓存优先逻辑随标记一同失效）。
+    if (force) active.clearDistrustFor(controls);
+    if (!force && useMenuStore.getState().loadedMenus.has(menuId)) return;
     const silent = options?.silent === true;
     const menu = useMenuStore.getState();
     if (!silent) menu.setStatus('loading', 0, null);
@@ -440,14 +457,17 @@ export const useDeviceStore = create<DeviceState>((set, get) => ({
     let done = 0;
     for (const control of controls) {
       try {
-        const value = await active.readValue(control);
+        const readBack = await active.readValue(control);
+        // 缓存优先解析（固件回读撒谎的对策）：不可信地址展示上次真实配置，
+        // 可信地址照常信任回读并同步缓存。
+        const resolved = active.resolveDisplayValue(control, readBack);
         // BugFix C：回读不可靠的地址（写入成功但固件回读恒 0 / 校验失败），
         // 保留用户已输入的乐观值，不让固件坏回读覆盖界面（衔接 f631fff 反清零）。
         const key = addressKey(control.address);
         const existing = useMenuStore.getState().addressValues[key];
         entries.push({
           control,
-          value: existing !== undefined && active.isReadbackUnreliable(key) ? existing : value,
+          value: existing !== undefined && active.isReadbackUnreliable(key) ? existing : resolved.value,
         });
       } catch {
         // 单个控件读失败不阻断整菜单：保留默认值，错误已由门面记录到调试面板
