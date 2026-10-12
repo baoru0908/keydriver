@@ -108,7 +108,21 @@ export function computeKeys(rows: readonly KleRow[]): KleKey[] {
         decal = props.d === undefined ? false : Boolean(props.d);
         continue;
       }
-      const name = parseKeyName(String(item as KleItem));
+      const rawText = String(item as KleItem);
+      const name = parseKeyName(rawText);
+      // KLE 标签：去掉矩阵坐标 / 布局选项元数据后的可见文本。
+      // 格式 ① "row,col"                → 无可见标签
+      // 格式 ② "row,col\n主标签"         → 主标签
+      // 格式 ③ "row,col\n\n\ngroup,option\n主标签\n次标签" → 主/次标签
+      // 格式 ④ "主标签"（无矩阵元数据） → 整段都是标签
+      const labelParts = rawText.split('\n');
+      const hasMatrix = /^\d+,\d+$/.test(labelParts[0] ?? '');
+      let labelStart = 0;
+      if (hasMatrix) {
+        const hasLayoutOption = labelParts.length >= 4 && /^\d+,\d+$/.test(labelParts[3] ?? '');
+        labelStart = hasLayoutOption ? 4 : 1;
+      }
+      const labels = labelParts.slice(labelStart).filter((s) => s !== '');
       const key = {
         matrix: name.matrix,
         group: name.group,
@@ -123,6 +137,7 @@ export function computeKeys(rows: readonly KleRow[]): KleKey[] {
         h2: h2 ?? h,
         color,
         decal,
+        labels,
       };
       out.push({
         ...key,
